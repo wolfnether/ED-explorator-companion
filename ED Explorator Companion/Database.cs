@@ -140,6 +140,7 @@ namespace ED_Explorator_Companion
                             if (sys == null)
                             {
                                 sys = new StarSystem();
+                                sys.SystemId = ((FSDJumpEvent)e).SystemAddress;
                                 sys.SystemName = ((FSDJumpEvent)e).StarSystem;
                                 sys.X = ((FSDJumpEvent)e).StarPos[0];
                                 sys.Y = ((FSDJumpEvent)e).StarPos[1];
@@ -248,6 +249,7 @@ namespace ED_Explorator_Companion
         {
             StarSystem sys = new StarSystem();
             sys.SystemName = edsmsystem.name;
+            sys.SystemId = edsmsystem.id64;
             sys.X = edsmsystem.coords.x;
             sys.Y = edsmsystem.coords.y;
             sys.Z = edsmsystem.coords.z;

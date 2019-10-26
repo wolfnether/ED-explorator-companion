@@ -9,6 +9,8 @@ namespace ED_Explorator_Companion
     internal class StarSystem
     {
         [Key]
+        public long SystemId { get; set; }
+
         public string SystemName { get; set; }
 
         public double X { get; set; }
