@@ -5,5 +5,6 @@ namespace ED_Explorator_Companion
     internal class FSDTargetEvent : BaseEvent
     {
         public string Name { get; set; }
+        public long SystemAddress { get; set; }
     }
 }

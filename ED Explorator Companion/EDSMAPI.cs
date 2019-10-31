@@ -17,12 +17,15 @@ namespace ED_Explorator_Companion
         {
             while (true)
             {
-                using var context = new Context();
-                var currentSys = Database.GetCurrentStarSystem(context);
-                var sysToImportQuery = Database.GetStarSystemQuery(context).Where(s => !s.Imported);
+                var currentSys = Database.CurrentStarSystem = Database.GetCurrentStarSystem();
 
-                int count;
-                count = sysToImportQuery.Count();
+                Database.mutex.WaitOne();
+                var sysToImport = Database.db.GetCollection<StarSystem>().Find(s => !s.Imported);
+
+                var count = sysToImport.Count();
+                var sys = Database.db.GetCollection<StarSystem>().Find(s => !s.Imported).OrderBy(s => s.AllBodiesFound).ThenBy(s => s.TriedToImport).ThenBy(s => (s.X - currentSys.X) * (s.X - currentSys.X) + (s.Y - currentSys.Y) * (s.Y - currentSys.Y) + (s.Z - currentSys.Z) * (s.Z - currentSys.Z)).FirstOrDefault();
+
+                Database.mutex.ReleaseMutex();
 
                 if (count == 0)
                 {
@@ -30,31 +33,27 @@ namespace ED_Explorator_Companion
                     continue;
                 }
 
-                if (currentSys == null) currentSys = Database.GetStarSystem(context, "Sol");
+                Program.mainForm.UpdateImport(count, sys);
 
-                StarSystem sysToImport;
-                sysToImport = sysToImportQuery.OrderBy(s => s.AllBodiesFound).ThenBy(s => s.TriedToImport).ThenBy(s => (s.X - currentSys.X) * (s.X - currentSys.X) + (s.Y - currentSys.Y) * (s.Y - currentSys.Y) + (s.Z - currentSys.Z) * (s.Z - currentSys.Z)).First();
-                Program.mainForm.UpdateImport(count, sysToImport);
-
-                sysToImport.TriedToImport++;
-                if (sysToImport.AllBodiesFound)
+                sys.TriedToImport++;
+                if (sys.AllBodiesFound)
                 {
-                    sysToImport.Imported = true;
+                    sys.Imported = true;
                 }
                 else
                 {
                     List<EDSMBody> bodies;
-                    bodies = GetSystemInformation(sysToImport.SystemName);
+                    bodies = GetSystemInformation(sys.SystemName);
 
                     if (bodies != null)
                     {
-                        Database.AddBodies(context, sysToImport, bodies);
-                        sysToImport.Imported = true;
+                        Database.AddBodies(sys, bodies);
+                        sys.Imported = true;
+                        Database.db.GetCollection<StarSystem>().Update(sys);
                     }
-                    if (currentSys != null && currentSys.DistanceFrom(sysToImport) <= 50 && !Database.StopUpdatingGui)
+                    if (currentSys != null && currentSys.DistanceFrom(sys) <= 50 && !Database.StopUpdatingGui)
                         Database.Queue.Enqueue(new UpdateFrontEvent(true, true));
                 }
-                context.SaveChanges();
             }
         }
 
@@ -88,11 +87,11 @@ namespace ED_Explorator_Companion
             return sys;
         }
 
-        internal static List<EDSMSystem> GetNearSystemAsync(StarSystem sys)
+        internal static List<EDSMSystem> GetNearSystem(StarSystem sys)
         {
             if (GetNearSystemAsyncThrottle > DateTime.Now) Thread.Sleep(GetNearSystemAsyncThrottle - DateTime.Now);
 
-            string path = "https://www.edsm.net/api-v1/sphere-systems?radius=50&showCoordinates=1&x=" + sys.X + "&y=" + sys.Y + "&z=" + sys.Z;
+            string path = "https://www.edsm.net/api-v1/sphere-systems?radius=50&showCoordinates=1&showId=1&x=" + sys.X + "&y=" + sys.Y + "&z=" + sys.Z;
             HttpResponseMessage response;
             try
             {

@@ -13,7 +13,7 @@ namespace ED_Explorator_Companion
 
         internal static void Init()
         {
-            var ret = Database.GetConfig(new Context(), "LastEvent");
+            var ret = Database.GetConfig("LastEvent");
             if (ret == null)
                 Database.Queue.Enqueue(new SetConfig("LastEvent", DateTime.MinValue.ToString()));
             else
@@ -92,7 +92,14 @@ namespace ED_Explorator_Companion
                                 Database.Queue.Enqueue(e.ToObject<FSDTargetEvent>());
                                 break;
 
-                            default: break;
+                            default:
+                                if (Database.Queue.IsEmpty)
+                                {
+                                    LastEvent = (DateTime)e["timestamp"];
+                                    Database.Queue.Enqueue(new SetConfig("LastEvent", LastEvent.ToString()));
+                                }
+
+                                continue;
                         }
                         LastEvent = (DateTime)e["timestamp"];
                         Database.Queue.Enqueue(new SetConfig("LastEvent", LastEvent.ToString()));

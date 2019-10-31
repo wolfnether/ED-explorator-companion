@@ -1,4 +1,5 @@
-﻿using System;
+﻿using LiteDB;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
@@ -8,7 +9,9 @@ namespace ED_Explorator_Companion
 {
     internal class StarSystem
     {
-        [Key]
+        [BsonId]
+        public ObjectId _id { get; set; }
+
         public long SystemId { get; set; }
 
         public string SystemName { get; set; }
@@ -20,33 +23,33 @@ namespace ED_Explorator_Companion
         public int Visites { get; set; } = 0;
         public DateTime LastVisite { get; set; } = DateTime.MinValue;
 
-        [NotMapped]
+        [BsonIgnore]
         public int BodiesScanned { get => Bodies.Where(b => b.Scanned).Count(); }
 
         public bool AllBodiesFound { get; set; } = false;
         public bool Imported { get; set; } = false;
         public int TriedToImport { get; set; } = 0;
 
-        public List<Body> Bodies { get; set; }
+        public List<Body> Bodies { get; set; } = new List<Body>();
+
         public bool NearStarImported { get; set; } = false;
 
         public int BodiesCount { get; set; } = 0;
 
-        [NotMapped]
+        [BsonIgnore]
         public double Distance { get => DistanceFromCurrent(); }
 
-        [NotMapped]
+        [BsonIgnore]
         public string DistanceStr { get => String.Format("{0:F2}", Distance) + "ly"; }
 
-        [NotMapped]
+        [BsonIgnore]
         public string InterrestingBodies { get => GetInterrestingBodies(); }
 
         public double DistanceFrom(StarSystem s) => Math.Sqrt(Math.Pow(s.X - X, 2) + Math.Pow(s.Y - Y, 2) + Math.Pow(s.Z - Z, 2));
 
         public double DistanceFromCurrent()
         {
-            using (var context = new Context())
-                return DistanceFrom(Database.CurrentStarSystem);
+            return DistanceFrom(Database.CurrentStarSystem);
         }
 
         internal string GetInterrestingBodies()

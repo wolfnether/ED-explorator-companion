@@ -1,6 +1,5 @@
 ﻿using ED_Explorator_Companion.Event;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Query;
+using LiteDB;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -11,55 +10,66 @@ namespace ED_Explorator_Companion
 {
     internal class Database
     {
-        private static object bodyLock = new object();
         public static ConcurrentQueue<BaseEvent> Queue = new ConcurrentQueue<BaseEvent>();
-        internal static object lockObj = new object();
+        //public static object lockingObject = new object();
+
         public static StarSystem CurrentStarSystem;
+        internal static Mutex mutex = new Mutex();
+
+        public static LiteDatabase db { get; } = new LiteDatabase(@"data.db");
 
         public static bool StopUpdatingGui { get; private set; } = false;
 
-        public static ConfigPair GetConfig(Context context, string key)
-        {
-            return context.ConfigPair.FirstOrDefault(c => c.Key == key);
-        }
+        public static ConfigPair GetConfig(string key) => db.GetCollection<ConfigPair>().FindOne(v => v.Key == key);
 
         internal static void Init()
         {
-            using (var context = new Context())
-            {
-                context.Database.EnsureCreated();
-                context.Database.AutoTransactionsEnabled = false;
-                CurrentStarSystem = GetCurrentStarSystem(context);
-            }
+            db.GetCollection<StarSystem>().EnsureIndex(x => x.SystemId, true);
+            db.GetCollection<StarSystem>().EnsureIndex(x => x.SystemName, false);
+            db.GetCollection<StarSystem>().EnsureIndex("body_name", "$.Bodies[*].BodyName");
         }
 
-        public static IIncludableQueryable<StarSystem, List<Body>> GetStarSystemQuery(Context context)
+        public static StarSystem GetStarSystem(long systemid)
         {
-            return context.StarSystems.Include(s => s.Bodies);
+            mutex.WaitOne();
+            StarSystem starSystem = db.GetCollection<StarSystem>().FindOne(s => s.SystemId == systemid);
+            mutex.ReleaseMutex();
+            return starSystem;
         }
 
-        public static StarSystem GetStarSystem(Context context, string systemName)
+        public static StarSystem GetStarSystem(string systemName)
         {
-            return GetStarSystemQuery(context).FirstOrDefault(s => s.SystemName == systemName);
+            mutex.WaitOne();
+            StarSystem starSystem = db.GetCollection<StarSystem>().FindOne(s => s.SystemName == systemName);
+            mutex.ReleaseMutex();
+            return starSystem;
         }
 
-        private static Body GetBody(Context context, string bodyName)
+        private static Body GetBody(string bodyName)
         {
-            return context.Bodies.Include(b => b.StarSystem).ThenInclude(s => s.Bodies).FirstOrDefault(b => b.BodyName == bodyName);
+            mutex.WaitOne();
+            var sys = db.GetCollection<StarSystem>().IncludeAll().FindOne(s => s.Bodies[0].BodyName == bodyName);
+            mutex.ReleaseMutex();
+            if (sys == null) return null;
+            return sys.Bodies.Find(b => b.BodyName == bodyName);
         }
 
-        public static StarSystem GetCurrentStarSystem(Context context)
+        public static StarSystem GetCurrentStarSystem()
         {
-            var currentSysConfig = GetConfig(context, "CurrentSystem");
+            mutex.WaitOne();
+            var currentSysConfig = GetConfig("CurrentSystem");
+            StarSystem sys;
             if (currentSysConfig == null)
             {
-                var sys = GetStarSystem(context, "Sol");
-                if (sys == null) sys = AddStarSystem(context, EDSMAPI.GetSystem("Sol"));
-                context.SaveChanges();
+                sys = GetStarSystem(10477373803);
+                if (sys == null) sys = AddStarSystem(EDSMAPI.GetSystem("Sol"));
+                mutex.ReleaseMutex();
                 return sys;
             }
-
-            return GetStarSystem(context, currentSysConfig.Value);
+            sys = GetStarSystem(currentSysConfig.Value);
+            mutex.ReleaseMutex();
+            if (sys == null) return AddStarSystem(EDSMAPI.GetSystem(currentSysConfig.Value));
+            return sys;
         }
 
         public static void Run()
@@ -67,8 +77,6 @@ namespace ED_Explorator_Companion
             bool DBUpdate = false;
             while (true)
             {
-                using var context = new Context();
-
                 Program.mainForm.UpdateStatus(Queue.Count + " Event To Process");
                 if (Queue.IsEmpty)
                 {
@@ -77,6 +85,7 @@ namespace ED_Explorator_Companion
                 }
                 Queue.TryDequeue(out var e);
                 Program.mainForm.UpdateStatus(Queue.Count + " Event To Process ( " + e.Event + " )");
+                StarSystem sys;
                 switch (e.Event)
                 {
                     case "StopUpdatingGuiOn":
@@ -90,154 +99,127 @@ namespace ED_Explorator_Companion
                     case "UpdateFrontEvent":
                         if (!DBUpdate && !((UpdateFrontEvent)e).Force) break;
 
-                        lock (Database.lockObj)
-                            if (((UpdateFrontEvent)e).Full)
-                            {
-                                var currentSys = CurrentStarSystem;
-                                var nearSystems = GetStarSystemQuery(context)
-                                    .Where(s => (s.X - currentSys.X) * (s.X - currentSys.X) + (s.Y - currentSys.Y) * (s.Y - currentSys.Y) + (s.Z - currentSys.Z) * (s.Z - currentSys.Z) <= 2500)
-                                    .OrderBy(s => (s.X - currentSys.X) * (s.X - currentSys.X) + (s.Y - currentSys.Y) * (s.Y - currentSys.Y) + (s.Z - currentSys.Z) * (s.Z - currentSys.Z))
-                                    .ToListAsync().GetAwaiter().GetResult();
-                                Program.mainForm.updateGrid(currentSys, nearSystems);
-                            }
-                            else
-                            {
-                                Program.mainForm.UpdateFirstLine(CurrentStarSystem);
-                            }
+                        var currentSys = CurrentStarSystem = GetCurrentStarSystem();
+                        if (((UpdateFrontEvent)e).Full)
+                        {
+                            mutex.WaitOne();
+                            var nearSystems = db.GetCollection<StarSystem>()
+                            .Find(s => (s.X - currentSys.X) * (s.X - currentSys.X) + (s.Y - currentSys.Y) * (s.Y - currentSys.Y) + (s.Z - currentSys.Z) * (s.Z - currentSys.Z) <= 2500)
+                            .OrderBy(s => (s.X - currentSys.X) * (s.X - currentSys.X) + (s.Y - currentSys.Y) * (s.Y - currentSys.Y) + (s.Z - currentSys.Z) * (s.Z - currentSys.Z))
+                            .ToList();
+                            mutex.ReleaseMutex();
+                            Program.mainForm.updateGrid(currentSys, nearSystems);
+                        }
+                        else
+                        {
+                            Program.mainForm.UpdateFirstLine();
+                        }
                         break;
 
                     case "FSDTarget":
                         var sysName = ((FSDTargetEvent)e).Name;
-                        var targetSys = GetStarSystem(context, sysName);
+                        var targetSys = GetStarSystem(((FSDTargetEvent)e).SystemAddress);
                         if (targetSys == null)
                         {
-                            Program.mainForm.UpdateStatus(sysName + " probably not scanned");
+                            Program.mainForm.UpdateStatus(((FSDTargetEvent)e).Name + " probably not scanned");
                             Thread.Sleep(1000);
                         }
                         break;
 
                     case "SetConfig":
-                        lock (Database.lockObj)
+                        var cp = GetConfig(((SetConfig)e).key);
+                        if (cp == null)
+                            db.GetCollection<ConfigPair>().Insert(new ConfigPair { Key = ((SetConfig)e).key, Value = ((SetConfig)e).value.ToString() });
+                        else
                         {
-                            var cp = GetConfig(context, ((SetConfig)e).key);
-                            if (cp == null)
-                            {
-                                cp = new ConfigPair();
-                                cp.Key = ((SetConfig)e).key;
-
-                                context.ConfigPair.Add(cp);
-                            }
                             cp.Value = ((SetConfig)e).value.ToString();
-
-                            context.SaveChanges();
+                            db.GetCollection<ConfigPair>().Update(cp);
                         }
+
                         break;
 
                     case "FSDJump":
-                        lock (Database.lockObj)
+                        sys = GetStarSystem(((FSDJumpEvent)e).SystemAddress);
+                        if (sys == null)
                         {
-                            var sys = GetStarSystem(context, ((FSDJumpEvent)e).StarSystem);
-                            if (sys == null)
+                            sys = new StarSystem();
+                            sys.SystemId = ((FSDJumpEvent)e).SystemAddress;
+                            sys.SystemName = ((FSDJumpEvent)e).StarSystem;
+                            sys.X = ((FSDJumpEvent)e).StarPos[0];
+                            sys.Y = ((FSDJumpEvent)e).StarPos[1];
+                            sys.Z = ((FSDJumpEvent)e).StarPos[2];
+                            sys._id = db.GetCollection<StarSystem>().Insert(sys);
+                            DBUpdate = true;
+                        }
+                        if (e.timestamp != sys.LastVisite)
+                        {
+                            sys.LastVisite = e.timestamp;
+                            sys.Visites++;
+                            DBUpdate = true;
+                            if (!sys.NearStarImported)
                             {
-                                sys = new StarSystem();
-                                sys.SystemId = ((FSDJumpEvent)e).SystemAddress;
-                                sys.SystemName = ((FSDJumpEvent)e).StarSystem;
-                                sys.X = ((FSDJumpEvent)e).StarPos[0];
-                                sys.Y = ((FSDJumpEvent)e).StarPos[1];
-                                sys.Z = ((FSDJumpEvent)e).StarPos[2];
-
-                                context.StarSystems.Add(sys);
-                                context.SaveChanges();
-                                DBUpdate = true;
-                            }
-                            if (e.timestamp != sys.LastVisite)
-                            {
-                                sys.LastVisite = e.timestamp;
-                                sys.Visites++;
-                                DBUpdate = true;
-                                if (!sys.NearStarImported)
+                                var nearSystem = EDSMAPI.GetNearSystem(sys);
+                                if (nearSystem != null)
                                 {
-                                    var nearSystem = EDSMAPI.GetNearSystemAsync(sys);
-                                    if (nearSystem != null)
+                                    var i = 0;
+                                    List<StarSystem> nearSys = new List<StarSystem>();
+                                    foreach (EDSMSystem _edsmsystem in nearSystem)
                                     {
-                                        var i = 0;
-                                        foreach (EDSMSystem _edsmsystem in nearSystem)
-                                        {
-                                            Program.mainForm.UpdateStatus("import system (" + ((++i * 100) / nearSystem.Count()) + "%)(" + i + "/" + nearSystem.Count + ") " + _edsmsystem.name);
-                                            if (GetStarSystem(context, _edsmsystem.name) == null)
-                                                AddStarSystem(context, _edsmsystem);
-                                        }
-
-                                        sys.NearStarImported = true;
+                                        Program.mainForm.UpdateStatus("import system (" + ((++i * 100) / nearSystem.Count()) + "%)(" + i + "/" + nearSystem.Count + ") " + _edsmsystem.name);
+                                        if (GetStarSystem(_edsmsystem.id64) == null)
+                                            nearSys.Add(edsmSysToStandarSys(_edsmsystem));
                                     }
+                                    db.GetCollection<StarSystem>().InsertBulk(nearSys);
+                                    sys.NearStarImported = true;
                                 }
                             }
-                            CurrentStarSystem = sys;
-                            context.SaveChanges();
                         }
 
                         break;
 
                     case "FSSDiscoveryScan":
-                        lock (Database.lockObj)
+                        sys = CurrentStarSystem;
+                        sys.BodiesCount = ((FSSDiscoveryScanEvent)e).BodyCount;
+                        if (((FSSDiscoveryScanEvent)e).Progress == 1.0d)
                         {
-                            var sys = GetStarSystem(context, ((FSSDiscoveryScanEvent)e).SystemName);
-                            if (sys == null) break;
-                            sys.BodiesCount = ((FSSDiscoveryScanEvent)e).BodyCount;
-                            if (((FSSDiscoveryScanEvent)e).Progress == 1.0d)
-                            {
-                                foreach (var body in sys.Bodies)
-                                    body.Scanned = true;
-                                sys.AllBodiesFound = true;
-                            }
-
-                            context.SaveChanges();
-                            DBUpdate = true;
+                            sys.Bodies.ForEach(b => b.Scanned = true);
+                            sys.AllBodiesFound = true;
                         }
+                        db.GetCollection<StarSystem>().Update(sys);
+                        DBUpdate = true;
                         break;
 
                     case "FSSAllBodiesFound":
-                        lock (Database.lockObj)
-                        {
-                            var sys = GetStarSystem(context, ((FSSAllBodiesFoundEvent)e).SystemName);
-                            if (sys == null) break;
-                            sys.AllBodiesFound = true;
-
-                            context.SaveChanges();
-                            DBUpdate = true;
-                        }
+                        sys = CurrentStarSystem;
+                        sys.AllBodiesFound = true;
+                        db.GetCollection<StarSystem>().Update(sys);
+                        DBUpdate = true;
                         break;
 
                     case "Scan":
-                        lock (Database.lockObj)
+                        if (((ScanEvent)e).BodyName.Contains("Belt Cluster")) break;
+                        sys = GetStarSystem(((ScanEvent)e).SystemAddress);
+                        if (sys == null) sys = AddStarSystem(EDSMAPI.GetSystem(((ScanEvent)e).StarSystem));
+                        var body = sys.Bodies.Where(b => b.BodyName == ((ScanEvent)e).BodyName).FirstOrDefault();
+                        if (body == null)
                         {
-                            lock (bodyLock)
-                            {
-                                if (((ScanEvent)e).BodyName.Contains("Belt Cluster")) break;
-                                var body = GetBody(context, ((ScanEvent)e).BodyName);
-                                var sys = GetStarSystem(context, ((ScanEvent)e).StarSystem);
-                                if (sys == null) break;
-                                if (body == null)
-                                {
-                                    body = new Body();
-                                    body.StarSystem = sys;
-                                    body.BodyName = ((ScanEvent)e).BodyName;
-                                    if (((ScanEvent)e).StarType != null)
-                                        body.BodyType = ((ScanEvent)e).StarType;
-                                    else
-                                        body.BodyType = ((ScanEvent)e).PlanetClass;
-                                    body.TerraformState = ((ScanEvent)e).TerraformState;
-                                    body.Distance = ((ScanEvent)e).DistanceFromArrivalLS;
+                            body = new Body();
+                            body.BodyName = ((ScanEvent)e).BodyName;
+                            if (((ScanEvent)e).StarType != null)
+                                body.BodyType = ((ScanEvent)e).StarType;
+                            else
+                                body.BodyType = ((ScanEvent)e).PlanetClass;
+                            body.TerraformState = ((ScanEvent)e).TerraformState;
+                            body.Distance = ((ScanEvent)e).DistanceFromArrivalLS;
+                            body.Scanned = true;
 
-                                    context.Bodies.Add(body);
-                                }
-
-                                body.Scanned = true;
-                                DBUpdate = true;
-
-                                context.SaveChanges();
-                            }
+                            sys.Bodies.Add(body);
+                            db.GetCollection<StarSystem>().Update(sys);
                         }
+                        body.Scanned = true;
+                        db.GetCollection<Body>().Update(body);
+                        DBUpdate = true;
+
                         break;
 
                     default: break;
@@ -245,7 +227,7 @@ namespace ED_Explorator_Companion
             }
         }
 
-        private static StarSystem AddStarSystem(Context context, EDSMSystem edsmsystem)
+        private static StarSystem edsmSysToStandarSys(EDSMSystem edsmsystem)
         {
             StarSystem sys = new StarSystem();
             sys.SystemName = edsmsystem.name;
@@ -253,37 +235,46 @@ namespace ED_Explorator_Companion
             sys.X = edsmsystem.coords.x;
             sys.Y = edsmsystem.coords.y;
             sys.Z = edsmsystem.coords.z;
-            context.StarSystems.Add(sys);
             return sys;
         }
 
-        public static void AddBodies(Context context, StarSystem sys, List<EDSMBody> bodies)
+        private static StarSystem AddStarSystem(EDSMSystem edsmsystem)
         {
-            lock (bodyLock)
+            StarSystem starSystem = GetStarSystem(edsmsystem.id64);
+            if (starSystem != null) return starSystem;
+            StarSystem sys = new StarSystem();
+            sys.SystemName = edsmsystem.name;
+            sys.SystemId = edsmsystem.id64;
+            sys.X = edsmsystem.coords.x;
+            sys.Y = edsmsystem.coords.y;
+            sys.Z = edsmsystem.coords.z;
+            sys._id = db.GetCollection<StarSystem>().Insert(sys);
+            return sys;
+        }
+
+        public static void AddBodies(StarSystem sys, List<EDSMBody> bodies)
+        {
+            foreach (var body in bodies)
             {
-                foreach (var body in bodies)
+                if (GetBody(body.name) != null) continue;
+                var dbbody = new Body();
+                dbbody.BodyName = body.name;
+                dbbody.Distance = body.distanceToArrival;
+                dbbody.BodyType = body.getEDsubType();
+                if (sys.AllBodiesFound)
+                    dbbody.Scanned = true;
+                if (body.terraformingState != null)
                 {
-                    if (GetBody(context, body.name) != null) continue;
-                    var dbbody = new Body();
-                    dbbody.StarSystem = sys;
-                    dbbody.BodyName = body.name;
-                    dbbody.Distance = body.distanceToArrival;
-                    dbbody.BodyType = body.getEDsubType();
-                    if (sys.AllBodiesFound)
-                        dbbody.Scanned = true;
-                    if (body.terraformingState != null)
-                    {
-                        if (body.terraformingState.Length == 0)
-                            dbbody.TerraformState = "";
-                        else if (body.terraformingState == "Candidate for terraforming")
-                            dbbody.TerraformState = "Terraformable";
-                        else if (body.terraformingState == "Terraformed")
-                            dbbody.TerraformState = "Terraformed";
-                    }
-                    context.Bodies.Add(dbbody);
+                    if (body.terraformingState.Length == 0)
+                        dbbody.TerraformState = "";
+                    else if (body.terraformingState == "Candidate for terraforming")
+                        dbbody.TerraformState = "Terraformable";
+                    else if (body.terraformingState == "Terraformed")
+                        dbbody.TerraformState = "Terraformed";
                 }
-                context.SaveChanges();
+                sys.Bodies.Add(dbbody);
             }
+            db.GetCollection<StarSystem>().Update(sys);
         }
     }
 }
